@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 允许上传/下载产物
+permissions:
+  contents: read
+
 jobs:
   # 公开 CI 能确定性跑通的部分：loader 编译 + 脚本静态检查 + 单元测试 +
   # 产物校验（用 fake_module.S 顶替真实 KO，验证 loader 与 verify 逻辑）。
@@ -37,20 +41,29 @@ jobs:
           path: out/dsuinit
           if-no-files-found: warn
 
-  # 内核模块 dsu_permissive.ko 默认使用公开的内核源码树交叉编译验证。
-  # 若自托管 runner 已准备好内核树，可设置仓库变量 DSU_CI_KDIR 直接复用，
-  # 跳过内核源码下载；否则按 matrix 的 kernel_ref 从 kernel.org 拉取对应版本。
+  # 为每个 DDK target 用公开内核源码树交叉编译 dsu_permissive.ko。
+  # 内核版本按 target 去重（5.10/5.15 被两个 target 共用）。
   module:
-    name: Kernel module (${{ matrix.kernel_ref }})
+    name: Module ${{ matrix.ddk_target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - kernel_ref: v6.12
-            ddk_target: android16-6.12
-          - kernel_ref: v6.6
-            ddk_target: android15-6.6
+          - ddk_target: android12-5.10
+            kernel_ref: v5.10
+          - ddk_target: android13-5.10
+            kernel_ref: v5.10
+          - ddk_target: android13-5.15
+            kernel_ref: v5.15
+          - ddk_target: android14-5.15
+            kernel_ref: v5.15
+          - ddk_target: android14-6.1
+            kernel_ref: v6.1
+          - ddk_target: android15-6.6
+            kernel_ref: v6.6
+          - ddk_target: android16-6.12
+            kernel_ref: v6.12
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,25 +75,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang lld llvm gcc-aarch64-linux-gnu python3
 
-      - name: Prepare kernel tree
-        id: kdir
-        env:
-          KERNEL_REF: ${{ matrix.kernel_ref }}
+      - name: Cache kernel tree
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/linux-${{ matrix.kernel_ref }}
+          key: kernel-${{ matrix.kernel_ref }}
+
+      - name: Clone kernel tree
+        if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          if [[ -n "${DSU_CI_KDIR:-}" ]]; then
-            echo "reuse-kdir=${DSU_CI_KDIR}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          KDIR="$RUNNER_TEMP/linux-${KERNEL_REF}"
-          echo "下载内核源码 ${KERNEL_REF}（shallow）"
-          git clone --depth 1 --branch "${KERNEL_REF}" \
-            https://github.com/torvalds/linux.git "$KDIR"
-          echo "reuse-kdir=${KDIR}" >> "$GITHUB_OUTPUT"
+          git clone --depth 1 --branch "$KERNEL_REF" \
+            https://github.com/torvalds/linux.git \
+            "$RUNNER_TEMP/linux-$KERNEL_REF"
+        env:
+          KERNEL_REF: ${{ matrix.kernel_ref }}
 
       - name: modules_prepare
-        if: ${{ env.DSU_CI_KDIR == '' }}
-        working-directory: ${{ steps.kdir.outputs.reuse-kdir }}
+        if: steps.kcache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}/linux-${{ matrix.kernel_ref }}
         run: |
           set -euo pipefail
           make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- \
@@ -88,7 +102,7 @@ jobs:
 
       - name: Build module
         env:
-          KDIR: ${{ steps.kdir.outputs.reuse-kdir }}
+          KDIR: ${{ runner.temp }}/linux-${{ matrix.kernel_ref }}
           DDK_TARGET: ${{ matrix.ddk_target }}
         run: |
           set -euo pipefail
@@ -96,12 +110,72 @@ jobs:
             KDIR="$KDIR" \
             ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- \
             DSU_DDK_TARGET="$DDK_TARGET"
-          ls -l out/dsu_permissive.ko
+          mv -f out/dsu_permissive.ko \
+            "out/dsu_permissive-$DDK_TARGET.ko"
+          ls -l "out/dsu_permissive-$DDK_TARGET.ko"
 
       - name: Upload module artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsu_permissive-${{ matrix.ddk_target }}.ko
-          path: out/dsu_permissive.ko
-          if-no-files-found: warn
+          path: out/dsu_permissive-${{ matrix.ddk_target }}.ko
+          if-no-files-found: error
+
+  # 汇总全部 KO + loader + 官方静态 magiskboot，生成设备端可执行的
+  # dsu-permissive-android-flasher.sh。
+  flasher:
+    name: Package android flasher
+    needs: [module, static-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm curl unzip ripgrep python3
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Assemble out/ directory
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # loader
+          find "$RUNNER_TEMP/artifacts/dsuinit" -name dsuinit \
+            -exec install -m 0755 {} out/dsuinit \;
+          # 全部 KO：按 target 重命名到 out/dsu_permissive-<target>.ko
+          shopt -s nullglob
+          for d in "$RUNNER_TEMP/artifacts"/dsu_permissive-*.ko; do
+            tgt=${d##*/}
+            tgt=${tgt%.ko}               # 去掉 .ko → dsu_permissive-<target>
+            tgt=${tgt#dsu_permissive-}   # → <target>
+            install -m 0644 \
+              "$d/dsu_permissive-$tgt.ko" \
+              "out/dsu_permissive-$tgt.ko"
+          done
+          ls -l out/
+
+      - name: Build flasher script
+        run: |
+          set -euo pipefail
+          tools/generate-android-flasher.sh \
+            --target auto \
+            --loader out/dsuinit \
+            --module-dir out \
+            --output out/dsu-permissive-android-flasher.sh
+          chmod 0755 out/dsu-permissive-android-flasher.sh
+          ls -l out/dsu-permissive-android-flasher.sh
+
+      - name: Upload flasher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsu-permissive-android-flasher
+          path: out/dsu-permissive-android-flasher.sh
+          if-no-files-found: error

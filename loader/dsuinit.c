@@ -4,6 +4,8 @@ typedef unsigned long size_t;
 #define AT_FDCWD (-100L)
 #define O_RDONLY 0L
 #define O_WRONLY 1L
+#define O_CREAT 0100L
+#define O_TRUNC 01000L
 #define O_CLOEXEC 02000000L
 #define O_NOFOLLOW 0400000L
 

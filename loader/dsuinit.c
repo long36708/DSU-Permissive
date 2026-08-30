@@ -20,6 +20,9 @@ typedef unsigned long size_t;
 
 #define MODULE_CONFIG_CAPACITY 96U
 #define MODULE_PARAMS_CAPACITY 96U
+#define FAILCOUNT_PATH "/dsu_permissive_failcount"
+#define FAILCOUNT_THRESHOLD 2
+#define FAILCOUNT_CAPACITY 16U
 
 static int log_fd = 2;
 
@@ -123,6 +126,7 @@ static int parse_module_config(const char *buffer, size_t length,
 	char selinux_value;
 	char avb_value;
 	char verity_table_value;
+	char always_avb_value;
 
 	if (!consume_text(buffer, length, &cursor, "selinux_intercept=") ||
 	    cursor == length)
@@ -137,9 +141,9 @@ static int parse_module_config(const char *buffer, size_t length,
 		return 0;
 
 	/*
-	 * format=3 used two switches. Keep accepting it so a loader update can
-	 * safely replace an older image; the new verity-table mode then stays at
-	 * the module default (disabled).
+	 * format=3 used two switches; format=4 added verity_table_spoof.
+	 * Keep accepting both so a loader update can safely replace an older
+	 * image; the then-absent mode stays at the module default (disabled).
 	 */
 	verity_table_value = '\0';
 	if (cursor != length) {
@@ -150,6 +154,20 @@ static int parse_module_config(const char *buffer, size_t length,
 			return 0;
 		verity_table_value = buffer[cursor++];
 		if ((verity_table_value != '0' && verity_table_value != '1') ||
+		    (cursor == length ||
+		     (cursor + 1 == length && buffer[cursor] != '\n')))
+			return 0;
+	}
+
+	always_avb_value = '\0';
+	if (cursor != length) {
+		if (cursor + 1 == length && buffer[cursor] == '\n')
+			goto parsed;
+		if (!consume_text(buffer, length, &cursor,
+				  "\nalways_avb=") || cursor == length)
+			return 0;
+		always_avb_value = buffer[cursor++];
+		if ((always_avb_value != '0' && always_avb_value != '1') ||
 		    (cursor != length &&
 		     (cursor + 1 != length || buffer[cursor] != '\n')))
 			return 0;
@@ -171,6 +189,13 @@ parsed:
 		if (output == capacity - 1)
 			return 0;
 		parameters[output++] = verity_table_value;
+	}
+	if (always_avb_value) {
+		output = append_text(parameters, capacity - 1, output,
+				     " always_avb=");
+		if (output == capacity - 1)
+			return 0;
+		parameters[output++] = always_avb_value;
 	}
 	parameters[output] = '\0';
 	return 1;
@@ -197,6 +222,73 @@ static void setup_log(void)
 			      O_WRONLY | O_CLOEXEC, 0);
 	if (result >= 0)
 		log_fd = (int)result;
+}
+
+/*
+ * 熔断计数：dsuinit 在加载 KO 前读取并自增；若连续失败达到阈值则跳过加载，
+ * 回退到原始启动行为。second-stage 成功后由内核模块删除该文件清零。
+ * 任何读写失败都按"保守"处理：读不出当 0，写不出则跳过加载（fail-safe）。
+ */
+static long read_failcount(void)
+{
+	char buffer[FAILCOUNT_CAPACITY];
+	long file;
+	long result;
+	long value = 0;
+	size_t index = 0;
+
+	file = raw_syscall4(SYS_OPENAT, AT_FDCWD, (long)FAILCOUNT_PATH,
+			    O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
+	if (file == ERR_ENOENT)
+		return 0;
+	if (file < 0)
+		return 0;
+
+	result = raw_syscall3(SYS_READ, file, (long)buffer, sizeof(buffer));
+	raw_syscall1(SYS_CLOSE, file);
+	if (result <= 0)
+		return 0;
+
+	while (index < (size_t)result && buffer[index] >= '0' &&
+	       buffer[index] <= '9') {
+		value = value * 10 + (buffer[index] - '0');
+		if (value > FAILCOUNT_THRESHOLD + 8)
+			value = FAILCOUNT_THRESHOLD + 8;
+		++index;
+	}
+	return value;
+}
+
+static int write_failcount(long value)
+{
+	char buffer[FAILCOUNT_CAPACITY];
+	size_t length = 0;
+	size_t i, j;
+	long file;
+	long result;
+
+	if (value <= 0)
+		value = 0;
+	/* 先逆序分解各位，再整理解出正序写入（高位在前）。 */
+	do {
+		buffer[length++] = '0' + (int)(value % 10);
+		value /= 10;
+	} while (value && length < sizeof(buffer));
+
+	for (i = 0, j = length; i < j; ++i, --j) {
+		char tmp = buffer[i];
+		buffer[i] = buffer[j - 1];
+		buffer[j - 1] = tmp;
+	}
+
+	file = raw_syscall4(SYS_OPENAT, AT_FDCWD, (long)FAILCOUNT_PATH,
+			    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+			    0600);
+	if (file < 0)
+		return -1;
+	result = raw_syscall3(SYS_WRITE, file, (long)buffer, length);
+	raw_syscall1(SYS_CLOSE, file);
+	return result == (long)length ? 0 : -1;
 }
 
 static void load_module_parameters(char *parameters, size_t capacity)
@@ -246,7 +338,35 @@ static void load_module(void)
 {
 	long file;
 	long result;
+	long failcount;
 	char parameters[MODULE_PARAMS_CAPACITY];
+
+	/*
+	 * 熔断：连续失败达阈值则跳过加载，原样启动，避免无法开机。
+	 * 先读取计数，达到阈值直接放弃；否则先自增（在加载前标记本次尝试），
+	 * 这样一旦 KO 导致崩溃，下次重启读到的就是 +1 的值。
+	 */
+	failcount = read_failcount();
+	if (failcount >= FAILCOUNT_THRESHOLD) {
+		write_log("<3>dsuinit：熔断计数已达 ");
+		{
+			char num[4];
+			size_t i = 0;
+
+			num[i++] = '0' + (int)(failcount % 10);
+			write_log(num);
+		}
+		write_log("，跳过 KO 加载，回退原始启动（请用 repatch 工具重置配置）\n");
+		return;
+	}
+	if (write_failcount(failcount + 1)) {
+		/*
+		 * 写计数失败（如只读 fs）：保守跳过加载，宁可不用功能也不冒
+		 * 无法回退的风险。
+		 */
+		write_log("<3>dsuinit：无法写入熔断计数，保守跳过 KO 加载\n");
+		return;
+	}
 
 	file = raw_syscall4(SYS_OPENAT, AT_FDCWD,
 			    (long)"/dsu_permissive.ko",

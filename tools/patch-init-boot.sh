@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "用法：$0 --input <boot.img|init_boot.img> --output <新镜像.img> --loader <dsuinit> --module <dsu_permissive.ko> [--selinux 0|1] [--avb 0|1] [--verity-table-spoof 0|1] [--magiskboot <路径>]" >&2
+    echo "用法：$0 --input <boot.img|init_boot.img> --output <新镜像.img> --loader <dsuinit> --module <dsu_permissive.ko> [--selinux 0|1] [--avb 0|1] [--verity-table-spoof 0|1] [--always 0|1] [--magiskboot <路径>]" >&2
 }
 
 prompt_switch() {
@@ -34,9 +34,11 @@ magiskboot_bin="${MAGISKBOOT:-magiskboot}"
 selinux_value=1
 avb_value=1
 verity_table_spoof_value=0
+always_avb_value=0
 selinux_specified=0
 avb_specified=0
 verity_table_spoof_specified=0
+always_avb_specified=0
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --selinux) selinux_value="${2:-}"; selinux_specified=1; shift 2 ;;
         --avb) avb_value="${2:-}"; avb_specified=1; shift 2 ;;
         --verity-table-spoof) verity_table_spoof_value="${2:-}"; verity_table_spoof_specified=1; shift 2 ;;
+        --always) always_avb_value="${2:-}"; always_avb_specified=1; shift 2 ;;
         --magiskboot) magiskboot_bin="${2:-}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "错误：未知参数 $1" >&2; usage; exit 2 ;;
@@ -60,8 +63,9 @@ if [[ -z "$input" || -z "$output" || -z "$loader" || -z "$module" ]]; then
 fi
 if [[ "$selinux_value" != 0 && "$selinux_value" != 1 ]] ||
    [[ "$avb_value" != 0 && "$avb_value" != 1 ]] ||
-   [[ "$verity_table_spoof_value" != 0 && "$verity_table_spoof_value" != 1 ]]; then
-    echo "错误：--selinux、--avb 与 --verity-table-spoof 只能是 0 或 1" >&2
+   [[ "$verity_table_spoof_value" != 0 && "$verity_table_spoof_value" != 1 ]] ||
+   [[ "$always_avb_value" != 0 && "$always_avb_value" != 1 ]]; then
+    echo "错误：--selinux、--avb、--verity-table-spoof 与 --always 只能是 0 或 1" >&2
     exit 2
 fi
 if [[ -t 0 && -t 2 ]]; then
@@ -73,6 +77,9 @@ if [[ -t 0 && -t 2 ]]; then
     fi
     if [[ "$verity_table_spoof_specified" -eq 0 ]]; then
         verity_table_spoof_value=$(prompt_switch "dm-verity 表伪造" "$verity_table_spoof_value")
+    fi
+    if [[ "$always_avb_specified" -eq 0 ]]; then
+        always_avb_value=$(prompt_switch "正常启动也启用(always_avb)" "$always_avb_value")
     fi
 fi
 
@@ -98,8 +105,8 @@ trap 'rm -rf -- "$work_dir"' EXIT
 mkdir -p "$work_dir/image" "$work_dir/assets" "$work_dir/extract"
 cp -- "$loader" "$work_dir/assets/dsuinit"
 cp -- "$module" "$work_dir/assets/dsu_permissive.ko"
-printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\n' \
-    "$selinux_value" "$avb_value" "$verity_table_spoof_value" \
+printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\nalways_avb=%s\n' \
+    "$selinux_value" "$avb_value" "$verity_table_spoof_value" "$always_avb_value" \
     > "$work_dir/assets/dsu_permissive.conf"
 
 cd "$work_dir/image"
@@ -127,7 +134,7 @@ original_init_sha256=$(sha256sum "$work_dir/extract/original-init" | awk '{print
 loader_sha256=$(sha256sum "$work_dir/assets/dsuinit" | awk '{print $1}')
 module_sha256=$(sha256sum "$work_dir/assets/dsu_permissive.ko" | awk '{print $1}')
 {
-    printf 'format=4\n'
+    printf 'format=5\n'
     printf 'project=DSU-Permissive\n'
     printf 'original_init_sha256=%s\n' "$original_init_sha256"
     printf 'loader_sha256=%s\n' "$loader_sha256"

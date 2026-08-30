@@ -38,6 +38,7 @@ assert_embedded_config() {
     local selinux_value=$2
     local avb_value=$3
     local verity_table_spoof_value=$4
+    local always_avb_value=${5:-0}
     local check_dir
 
     check_dir=$(mktemp -d "$work_dir/config-check.XXXXXX")
@@ -46,8 +47,9 @@ assert_embedded_config() {
         "$magiskboot_bin" unpack "$image" >/dev/null
         "$magiskboot_bin" cpio ramdisk.cpio \
             "extract dsu_permissive.conf config"
-        printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\n' \
-            "$selinux_value" "$avb_value" "$verity_table_spoof_value" > expected
+        printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\nalways_avb=%s\n' \
+            "$selinux_value" "$avb_value" "$verity_table_spoof_value" \
+            "$always_avb_value" > expected
         cmp -s config expected
     )
     rm -rf "$check_dir"
@@ -63,7 +65,7 @@ assert_metadata_hides_config() {
         "$magiskboot_bin" unpack "$image" >/dev/null
         "$magiskboot_bin" cpio ramdisk.cpio \
             "extract dsu_permissive.meta metadata"
-        grep -qx 'format=4' metadata
+        grep -qx 'format=5' metadata
         if grep -q '^config_sha256=' metadata; then
             echo "错误：metadata 泄漏内嵌配置哈希" >&2
             exit 1
@@ -96,7 +98,7 @@ fi
     --magiskboot "$magiskboot_bin" >/dev/null
 "$root_dir/tools/verify-init-boot.sh" \
     --input "$work_dir/patched.img" --magiskboot "$magiskboot_bin" >/dev/null
-assert_embedded_config "$work_dir/patched.img" 1 1 0
+assert_embedded_config "$work_dir/patched.img" 1 1 0 0
 assert_metadata_hides_config "$work_dir/patched.img"
 if "$root_dir/tools/patch-init-boot.sh" \
     --input "$work_dir/patched.img" \
@@ -120,7 +122,7 @@ sh "$root_dir/tools/patch-init-boot-android.sh" \
 "$root_dir/tools/verify-init-boot.sh" \
     --input "$work_dir/android-patched.img" \
     --magiskboot "$magiskboot_bin" >/dev/null
-assert_embedded_config "$work_dir/android-patched.img" 0 1 1
+assert_embedded_config "$work_dir/android-patched.img" 0 1 1 0
 assert_metadata_hides_config "$work_dir/android-patched.img"
 if sh "$root_dir/tools/patch-init-boot-android.sh" \
     --input "$work_dir/android-patched.img" \
@@ -143,18 +145,19 @@ sh "$root_dir/tools/patch-init-boot-android.sh" \
 "$root_dir/tools/verify-init-boot.sh" \
     --input "$work_dir/android-updated.img" \
     --magiskboot "$magiskboot_bin" >/dev/null
-assert_embedded_config "$work_dir/android-updated.img" 1 1 0
+assert_embedded_config "$work_dir/android-updated.img" 1 1 0 0
 sh "$root_dir/tools/repatch-init-boot-config-android.sh" \
     --input "$work_dir/android-updated.img" \
     --output "$work_dir/android-reconfigured.img" \
     --selinux 1 \
     --avb 0 \
     --verity-table-spoof 1 \
+    --always 1 \
     --magiskboot "$magiskboot_bin" >/dev/null
 "$root_dir/tools/verify-init-boot.sh" \
     --input "$work_dir/android-reconfigured.img" \
     --magiskboot "$magiskboot_bin" >/dev/null
-assert_embedded_config "$work_dir/android-reconfigured.img" 1 0 1
+assert_embedded_config "$work_dir/android-reconfigured.img" 1 0 1 1
 assert_metadata_hides_config "$work_dir/android-reconfigured.img"
 "$root_dir/tools/unpatch-init-boot.sh" \
     --input "$work_dir/android-reconfigured.img" \

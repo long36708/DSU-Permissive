@@ -21,7 +21,7 @@ if command -v shellcheck >/dev/null 2>&1; then
         tools/patch-init-boot-android.sh \
         tools/repatch-init-boot-config-android.sh
 fi
-expected_config=$'selinux_intercept=1\navb_intercept=1\nverity_table_spoof=0'
+expected_config=$'selinux_intercept=1\navb_intercept=1\nverity_table_spoof=0\nalways_avb=0'
 actual_config=$(<config/dsu_permissive.conf)
 if [[ "$actual_config" != "$expected_config" ]]; then
     echo "错误：默认统一配置内容不符合预期" >&2

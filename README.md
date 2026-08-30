@@ -45,7 +45,7 @@ first-stage init 会在每次判断 DSU 前删除旧标记，因此正常启动�
 
 ## 统一配置
 
-修补器将如下严格三行配置写入 ramdisk：
+修补器将如下严格四行配置写入 ramdisk：
 
 ```text
 /dsu_permissive.conf
@@ -57,19 +57,25 @@ first-stage init 会在每次判断 DSU 前删除旧标记，因此正常启动�
 selinux_intercept=1
 avb_intercept=1
 verity_table_spoof=0
+always_avb=0
 ```
 
-三个键必须各出现一次，值只能是 `0` 或 `1`：
+四个键必须各出现一次，值只能是 `0` 或 `1`：
 
 | 配置 | `1` | `0` |
 | --- | --- | --- |
 | `selinux_intercept` | 允许 bootconfig 注入与 selinuxfs/enforce 启动期切换 | 不注入 bootconfig，也不执行 permissive 切换 |
 | `avb_intercept` | 修改 first-stage vbmeta 返回视图；实际修改成功后在 selinux_setup 同步 `veritymode=disabled` | 始终透传原始 vbmeta/DM table 数据且不覆盖 `veritymode` |
 | `verity_table_spoof` | 在 `avb_intercept=1` 时，统一将匹配的 DSU GSI first-stage `verity` 表伪装为 `linear` | 所有 dm-verity 表原样透传 |
+| `always_avb` | 对正常（非 DSU）启动也启用 AVB 视图篡改；仍受 `avb_enforce` 硬拒绝约束，且正常模式下强制关闭表伪装 | 仅 DSU 启动生效 |
 
-三项可以显式指定：`--selinux 0|1`、`--avb 0|1`、`--verity-table-spoof 0|1`。默认值为 `1/1/0`，交互终端只会询问未指定的项。表伪造依赖 AVB 拦截；`--avb 0` 时即使填写 `--verity-table-spoof 1` 也不会改写表。KO 不读取任何配置文件，因此不会导入厂商 GKI 可能拒绝的 `dentry_open()`、`kernel_read()` 等符号。模块参数不创建 sysfs 可读节点。
+四项可以显式指定：`--selinux 0|1`、`--avb 0|1`、`--verity-table-spoof 0|1`、`--always 0|1`。默认值为 `1/1/0/0`，交互终端只会询问未指定的项。表伪造依赖 AVB 拦截；`--avb 0` 时即使填写 `--verity-table-spoof 1` 也不会改写表。正常模式（`always_avb=1`）下 `verity_table_spoof` 被强制关闭。KO 不读取任何配置文件，因此不会导入厂商 GKI 可能拒绝的 `dentry_open()`、`kernel_read()` 等符号。模块参数不创建 sysfs 可读节点。
 
 `/dsu_permissive.conf` 在 ramdisk 中的权限为 `0600`。`dsuinit` 以 `O_NOFOLLOW|O_CLOEXEC` 打开它后必须先 unlink 成功才读取；读取后立即关闭 FD。因此，进入后续 init 链的其他程序没有可打开的配置路径。raw `boot/init_boot` 镜像仍可被拥有离线 root/recovery 权限的一方提取，这不是运行时文件权限能够防止的。更改开关需要重新修补镜像；已修补镜像可用 `repatch-init-boot-config-android.sh` 仅替换配置并保留 loader、KO 和原 init。
+
+### 熔断与自救
+
+`dsuinit` 在加载 KO 前读取 ramdisk 内的 `/dsu_permissive_failcount`：连续失败达到阈值（2 次）即跳过加载、原样启动，避免无法开机；每次尝试前先自增计数，KO 导致崩溃则下次累计。模块在 second-stage 成功后删除该文件清零，使稳定启动后自动复位。即便如此，仍可在 recovery/fastbootd 内用 `repatch-init-boot-config-android.sh` 将 `always_avb` 改回 `0` 恢复，或用 `unpatch-init-boot.sh` 彻底还原。两层机制均不写 vbmeta、不签名、不碰 bootloader。
 
 ## 构建
 
@@ -121,6 +127,19 @@ out/dsu_permissive-android12-5.10.ko
 ```bash
 make -C loader
 ```
+
+### 持续集成（GitHub Actions）
+
+仓库自带 `.github/workflows/build.yml`，在 `ubuntu-latest` 上跑：
+
+- **`static-check` job**：安装 `clang`/`lld`/`llvm`/`ripgrep`/`shellcheck`/`python3`，
+  执行 `tests/static-check.sh`——编译 loader（`make -C loader`，不依赖内核树）、
+  校验所有 shell 脚本语法、运行 Python 单元测试，并用 `tests/fake_module.S`
+  顶替真实 KO 验证 loader 与 `tools/verify-artifacts.sh` 的产物校验逻辑。
+  该 job 不依赖任何私有资源，公开仓库推送即触发。
+- **`module` job**：内核模块 `dsu_permissive.ko` 需要内核源码树（`KDIR`）与 vivo DDK 头，
+  公开 CI 无法复刻，因此默认跳过。在自托管 runner 上设置仓库变量
+  `DSU_CI_BUILD_MODULE=1` 与 `DSU_CI_KDIR` 后，该 job 才会真正交叉编译并上传 KO 产物。
 
 ## 修改 boot/init_boot 镜像
 

@@ -13,7 +13,31 @@
 #include "selinux_enforce_proxy.h"
 #include "vbmeta_proxy.h"
 
+#include <linux/fs.h>
+#include <linux/namei.h>
+#include <linux/path.h>
+#include <linux/version.h>
+
 #define HOOK_TIMEOUT_SECONDS 120U
+
+/*
+ * second-stage 成功意味着本次启动已稳定通过；由模块删除 dsuinit 维护的
+ * 熔断计数文件，使下次启动重新从 0 计起。任何失败（文件不存在/无权限/
+ * 只读 fs）都静默忽略——熔断只是自救兜底，不应影响正常启动。
+ */
+static void dsu_permissive_clear_failcount(void)
+{
+	struct path path;
+	int error;
+
+	if (kern_path(DSU_FAILCOUNT_PATH, LOOKUP_FOLLOW, &path))
+		return;
+	error = vfs_unlink(path.dentry->d_parent->d_inode, path.dentry, NULL);
+	if (error)
+		pr_warn("dsu-permissive：清零熔断计数失败（%d），下次启动将重新累计\n",
+			error);
+	path_put(&path);
+}
 
 static atomic_t phase = ATOMIC_INIT(DSU_PHASE_WAIT_SYSTEM_INIT);
 static atomic_t stop_reason = ATOMIC_INIT(DSU_STOP_TIMEOUT);
@@ -59,6 +83,8 @@ static void stop_hooks(struct work_struct *work)
 	if (atomic_read(&phase) == DSU_PHASE_DISABLED)
 		return;
 	reason = (enum dsu_permissive_stop_reason)atomic_read(&stop_reason);
+	if (reason == DSU_STOP_SECOND_STAGE)
+		dsu_permissive_clear_failcount();
 	cancel_delayed_work(&timeout_work);
 	exec_gate_unregister();
 	dm_ioctl_proxy_unregister();

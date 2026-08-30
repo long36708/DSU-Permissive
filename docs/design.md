@@ -22,9 +22,9 @@ avb_intercept=0|1
 verity_table_spoof=0|1
 ```
 
-`dsuinit` 位于 first-stage init 之前，因而在加载 KO 前以普通用户空间 syscall 打开配置。format=4 配置严格限制为三行、固定键序和 `0|1` 值；读取前必须 unlink 成功，随后通过仍打开的 FD 读取，并在传给 `finit_module()` 后关闭。为使完整替换能安全升级旧镜像，loader 仍接受旧 format=3 的两行配置，并让新开关保持默认关闭。ramdisk 条目权限是 `0600`，模块参数权限为 `0000`，不创建 sysfs 可读节点。进入 `/init.next` 之前没有配置文件路径可供后续程序打开。离线 root/recovery 仍能读取 raw boot 镜像，这是镜像本身的信任边界。
+`dsuinit` 位于 first-stage init 之前，因而在加载 KO 前以普通用户空间 syscall 打开配置。format=5 配置严格限制为四行、固定键序和 `0|1` 值；读取前必须 unlink 成功，随后通过仍打开的 FD 读取，并在传给 `finit_module()` 后关闭。为使完整替换能安全升级旧镜像，loader 仍接受旧 format=3 的两行配置，并让新开关保持默认关闭。ramdisk 条目权限是 `0600`，模块参数权限为 `0000`，不创建 sysfs 可读节点。进入 `/init.next` 之前没有配置文件路径可供后续程序打开。离线 root/recovery 仍能读取 raw boot 镜像，这是镜像本身的信任边界。
 
-厂商 GKI 对外部 LKM 的符号策略不能只由 DDK 编译判断：已观察到 `filp_open` 未导出、`dentry_open` 位于仅供文件系统实现使用的内部命名空间、`kernel_read` 被标记为 protected symbol。为避免 KO 在 PID 1 first-stage 加载时直接失败，模块不导入 `filp_open`、`dentry_open`、`kernel_read` 或 `filp_close`，只从 `finit_module()` 接收三个布尔参数。`selinux_intercept=0` 禁用 permissive bootconfig 注入与 enforce 切换；`avb_intercept=0` 让 vbmeta 代理始终透传原始读取结果，并且不注入 orange 或 `veritymode=disabled`；`verity_table_spoof=1` 才会在 AVB 拦截窗口内改写匹配的 DSU verity 表。未指定修补器参数时默认值是 `1/1/0`。
+厂商 GKI 对外部 LKM 的符号策略不能只由 DDK 编译判断：已观察到 `filp_open` 未导出、`dentry_open` 位于仅供文件系统实现使用的内部命名空间、`kernel_read` 被标记为 protected symbol。为避免 KO 在 PID 1 first-stage 加载时直接失败，模块不导入 `filp_open`、`dentry_open`、`kernel_read` 或 `filp_close`，只从 `finit_module()` 接收三个布尔参数。`selinux_intercept=0` 禁用 permissive bootconfig 注入与 enforce 切换；`avb_intercept=0` 让 vbmeta 代理始终透传原始读取结果，并且不注入 orange 或 `veritymode=disabled`；`verity_table_spoof=1` 才会在 AVB 拦截窗口内改写匹配的 DSU verity 表。未指定修补器参数时默认值是 `1/1/0/0`（最后一位 `always_avb` 默认关闭）。
 
 模块仍通过 `kern_path()` 检查 DSU 标记并解析 vbmeta by-name 路径，因此同时声明 `ANDROID_GKI_VFS_EXPORT_ONLY` 与 `VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver` 两个独立的 import namespace。部分厂商 6.6 GKI 会对 `kern_path` 强制校验后一个 namespace；缺失时 `finit_module()` 会以 `EINVAL` 失败并记录 `Unknown symbol kern_path (err -22)`。
 
@@ -116,6 +116,17 @@ AOSP `libfs_avb` 通过 `pread64(offset=0)` 读取顶层 vbmeta。支持的 GKI 
 这里不能用 `param->data_size` 作为 target payload 边界：Android 15 / Linux 6.6 的 `ctl_ioctl()` 在调用 `table_load()` 前会把它复位为 `offsetof(struct dm_ioctl, data)`。模块使用第三参数 `param_size`；因此也不再从 fops proxy 对同一用户指针进行第二次 `copy_from_user()`。这规避了 vivo first-stage fallback 请求可被 dm core 正常处理、但额外 header 读取失败的路径。
 
 因此规则同时覆盖 `/dev/block/dm-N`、`/dev/mapper/<name>`、`/dev/block/mapper/<name>` 与 `major:minor` 四种 libdm data-device 表示；不命中、多个 target、非零 start、非 DSU、非 PID 1、second-stage、`avb_enforce` 或非 GSI backing 均原样透传。
+
+## 正常启动模式（always_avb）与熔断自救
+
+`always_avb=1` 让模块不再依赖 DSU booted 标记，对**正常（非 DSU）启动**也生效。它只改变 `dsu_detect_active()` 的判定：DSU 标记存在、或 `always_avb=1` 且不存在 `avb_enforce` 时均视为激活。该开关仍受 `avb_enforce` 硬拒绝约束，也不能覆盖 bootloader 的强制验证。正常模式下 `verity_table_spoof` 被强制关闭——表伪装是 DSU 无-footer GSI 专用绕过，正常分区的 hashtree 有效，改 linear 反而不必要地破坏完整性。
+
+为应对"开启后无法开机"，提供两层互不影响、都不依赖内核模块本身健全性的自救：
+
+- **loader 熔断**：`dsuinit` 在 `finit_module()` 之前读取 ramdisk 内的 `/dsu_permissive_failcount`（ASCII 计数）。若已达阈值（2），跳过加载、原样启动并打日志。否则先自增计数再加载——一旦 KO 导致崩溃，下次重启读到的就是 +1 值。读取失败按 0、写入失败按 fail-safe 跳过加载。计数文件由模块在 `second_stage` 停止时 `vfs_unlink` 清零，因此连续两次稳定启动后自动复位；清零失败静默忽略，仅下次重新累计。
+- **repatch 自救通道**：配置 `0600` + 加载即 unlink，运行期程序无法读取/修改；但 `repatch-init-boot-config-android.sh`（仅替换 ramdisk 内 conf 三/四开关、不动 loader/KO）可在 recovery/fastbootd/另一系统内把 `always_avb` 改回 0，无需重新编译。配合 `unpatch-init-boot.sh` 可彻底还原原 init 链。
+
+两层机制都不写 vbmeta、不签名、不碰 bootloader，因此即使配置/模块被滥用，破坏范围也仅限"本次启动 PID 1 看到的视图"，重启即失。
 
 ## exec 门控
 
@@ -215,7 +226,7 @@ fs_mgr 的 `GetBootconfigFromString()` 在首次找到目标 key 后不再覆盖
 ## 失败策略
 
 - KO 打开或加载失败：`dsuinit`记录错误并继续原 init 链。
-- 内嵌配置缺失、无法 unlink、读取失败或语法无效：loader 不传参数，模块使用默认 `1/1/0`，并记录错误；修补器与镜像验证器会拒绝生成或验证不符合其 format 的配置。仅配置重修补拒绝把 format=3 镜像与旧 loader 静默升级到 format=4，必须完整替换新版 loader/KO。
+- 内嵌配置缺失、无法 unlink、读取失败或语法无效：loader 不传参数，模块使用默认 `1/1/0/0`，并记录错误；修补器与镜像验证器会拒绝生成或验证不符合其 format 的配置。仅配置重修补拒绝把 format=3 镜像与旧 loader 静默升级到 format=5，必须完整替换新版 loader/KO。
 - KO 与设备 GKI/KMI target 不匹配：内核拒绝加载，`dsuinit`记录错误并继续原 init 链。
 - `/init.next` 执行失败：依次尝试 `/init.real` 与 `/system/bin/init`，所有失败均记录。
 - tracepoint 或 kprobe 注册失败：KO 加载失败并保留明确内核日志，系统启动仍由 loader 继续。

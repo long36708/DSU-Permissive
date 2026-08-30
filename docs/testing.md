@@ -20,7 +20,7 @@ MODULE_UNDER_TEST=out/dsu_permissive-android15-6.6.ko \
 
 - AArch64 freestanding loader 构建；
 - loader 无 `PT_INTERP`、无动态依赖、无未解析符号；
-- `init_boot` 内嵌配置三个键的八种组合、format=4 严格三行格式、默认 `1/1/0`、模块参数传递，以及 Android 重修补配置往返；
+- `init_boot` 内嵌配置四个键的十六种组合、format=5 严格四行格式、默认 `1/1/0/0`、模块参数传递，以及 Android 重修补配置往返；
 - AVB header `AVB0`、flags `[120,124)` 与目标字节 123 的偏移契约；
 - `0x80000002 → 0x80000003`、已含 `0x01` 时幂等，以及分片读取边界；
 - 非 PID 1、非 WAIT 阶段、非 DSU、非目标设备、`avb_enforce` 与错误魔数均不修改；
@@ -30,7 +30,7 @@ MODULE_UNDER_TEST=out/dsu_permissive-android15-6.6.ko \
 - AVB 拦截未关闭、DSU active 且不存在 `avb_enforce` 时，first-stage 临时覆盖 `androidboot.verifiedbootstate`；仅在 vbmeta 返回视图实际修改成功后，selinux_setup 临时覆盖 `androidboot.veritymode`；second-stage 恢复完整原始视图；
 - `user` / `userdebug` init 的 enforce fallback 状态矩阵；
 - KO 必须分别声明 Android GKI VFS 与 `kern_path` 内部 VFS namespace；不得导入 `filp_open` / `dentry_open` / `kernel_read` / `filp_close` 文件读取链，也不得导入目标设备拒绝的 `kernel_write` / `vfs_fsync` 系列符号；
-- 主机 Bash 与 Android `/system/bin/sh` 两套脚本生成相同 `format=4` 镜像元数据布局，Android 脚本还覆盖旧补丁哈希校验、逻辑还原、loader/KO 替换与仅配置重修补往返；
+- 主机 Bash 与 Android `/system/bin/sh` 两套脚本生成相同 `format=5` 镜像元数据布局，Android 脚本还覆盖旧补丁哈希校验、逻辑还原、loader/KO 替换与仅配置重修补往返；
 - 单文件 Android 刷写生成器覆盖自动 KMI bundle 的资源哈希、自校验和 target 选择；不要求构建单一 KMI 绑定的刷写产物；
 - 可代表 Android 12 `boot.img` 或 Android 13 及以上 `init_boot.img` 的最小 boot header v4 镜像往返；
 - KernelSU 的 `/init.real` 与 `/kernelsu.ko` 在往返后哈希不变。

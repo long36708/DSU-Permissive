@@ -1,0 +1,74 @@
+name: Build & Static Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # 公开 CI 能确定性跑通的部分：loader 编译 + 脚本静态检查 + 单元测试 +
+  # 产物校验（用 fake_module.S 顶替真实 KO，验证 loader 与 verify 逻辑）。
+  static-check:
+    name: Loader build & static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm ripgrep shellcheck python3
+
+      - name: Run static checks & tests
+        run: |
+          set -euo pipefail
+          bash -x tests/static-check.sh
+
+      - name: Upload loader artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsuinit
+          path: out/dsuinit
+          if-no-files-found: warn
+
+  # 内核模块 dsu_permissive.ko 依赖内核源码树（KDIR）与 vivo DDK 头。
+  # 公开 CI 没有这些资源，因此这个 job 默认跳过；如果你有可用的内核树，
+  # 在自托管 runner 上设置 KDIR 后它才会真正编译。
+  module:
+    name: Kernel module (needs KDIR)
+    runs-on: ubuntu-latest
+    # 没有 KDIR 时直接跳过，避免公开 CI 误报失败。
+    if: ${{ vars.DSU_CI_BUILD_MODULE == '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu
+
+      - name: Build module
+        env:
+          KDIR: ${{ vars.DSU_CI_KDIR }}
+        run: |
+          set -euo pipefail
+          test -n "${KDIR:-}" || { echo "错误：未设置 KDIR" >&2; exit 1; }
+          make module KDIR="$KDIR"
+          ls -l out/dsu_permissive.ko
+
+      - name: Upload module artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsu_permissive-ko
+          path: out/dsu_permissive.ko
+          if-no-files-found: warn

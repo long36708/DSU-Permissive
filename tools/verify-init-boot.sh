@@ -63,7 +63,7 @@ done
 format=$(metadata_value format "$work_dir/extract/metadata") || format=""
 project=$(metadata_value project "$work_dir/extract/metadata") || project=""
 if [[ ( "$format" != "1" && "$format" != "2" && "$format" != "3" &&
-      "$format" != "4" ) ||
+      "$format" != "4" && "$format" != "5" ) ||
       "$project" != "DSU-Permissive" ]]; then
     echo "错误：补丁元数据无效" >&2
     exit 1
@@ -112,6 +112,8 @@ case "$format" in
             "$work_dir/extract/config")
         config_verity_table_spoof=$(awk -F= '$1 == "verity_table_spoof" { print $2 }' \
             "$work_dir/extract/config")
+        config_always_avb=$(awk -F= '$1 == "always_avb" { print $2 }' \
+            "$work_dir/extract/config")
         if [[ "$config_selinux" != "0" && "$config_selinux" != "1" ]] ||
            [[ "$config_avb" != "0" && "$config_avb" != "1" ]]; then
             echo "错误：内嵌配置内容无效" >&2
@@ -123,16 +125,26 @@ case "$format" in
                 echo "错误：内嵌 dm-verity 表伪造配置无效" >&2
                 exit 1
             fi
+            if [[ -n "$config_always_avb" ]]; then
+                echo "错误：format=4 镜像不应包含 always_avb 配置" >&2
+                exit 1
+            fi
             printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\n' \
                 "$config_selinux" "$config_avb" "$config_verity_table_spoof" \
                 > "$work_dir/extract/expected-config"
         else
-            if [[ -n "$config_verity_table_spoof" ]]; then
-                echo "错误：format=$format 镜像不应包含 dm-verity 表伪造配置" >&2
+            if [[ "$config_verity_table_spoof" != "0" &&
+                  "$config_verity_table_spoof" != "1" ]]; then
+                echo "错误：内嵌 dm-verity 表伪造配置无效" >&2
                 exit 1
             fi
-            printf 'selinux_intercept=%s\navb_intercept=%s\n' \
-                "$config_selinux" "$config_avb" \
+            if [[ "$config_always_avb" != "0" && "$config_always_avb" != "1" ]]; then
+                echo "错误：内嵌 always_avb 配置无效" >&2
+                exit 1
+            fi
+            printf 'selinux_intercept=%s\navb_intercept=%s\nverity_table_spoof=%s\nalways_avb=%s\n' \
+                "$config_selinux" "$config_avb" "$config_verity_table_spoof" \
+                "$config_always_avb" \
                 > "$work_dir/extract/expected-config"
         fi
         if ! cmp -s "$work_dir/extract/config" \

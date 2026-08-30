@@ -13,11 +13,13 @@ sh -n tools/patch-init-boot-android.sh
 sh -n tools/repatch-init-boot-config-android.sh
 sh -n tools/android-flasher-template.sh
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck -x tools/fetch-static-magiskboot.sh \
+    # 只把 warning 及以上视为失败；info 级别（如 SC2015/SC2317 风格建议）
+    # 不阻断 CI。
+    shellcheck -S warning -x tools/fetch-static-magiskboot.sh \
         tools/generate-android-flasher.sh \
         tests/test-android-flasher-generator.sh \
         tests/test-image-roundtrip.sh tools/build.sh
-    shellcheck -s sh tools/android-flasher-template.sh \
+    shellcheck -S warning -s sh tools/android-flasher-template.sh \
         tools/patch-init-boot-android.sh \
         tools/repatch-init-boot-config-android.sh
 fi

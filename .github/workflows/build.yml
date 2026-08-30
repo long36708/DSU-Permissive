@@ -152,18 +152,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          # loader
-          find "$RUNNER_TEMP/artifacts/dsuinit" -name dsuinit \
-            -exec install -m 0755 {} out/dsuinit \;
-          # 全部 KO：按 target 重命名到 out/dsu_permissive-<target>.ko
-          shopt -s nullglob
-          for d in "$RUNNER_TEMP/artifacts"/dsu_permissive-*.ko; do
-            tgt=${d##*/}
-            tgt=${tgt%.ko}               # 去掉 .ko → dsu_permissive-<target>
-            tgt=${tgt#dsu_permissive-}   # → <target>
-            install -m 0644 \
-              "$d/dsu_permissive-$tgt.ko" \
-              "out/dsu_permissive-$tgt.ko"
+          ART="$RUNNER_TEMP/artifacts"
+          # loader：在下载产物树中查找名为 dsuinit 的文件
+          mapfile -t loaders < <(find "$ART" -type f -name dsuinit)
+          if [ "${#loaders[@]}" -eq 0 ]; then
+            echo "错误：未找到 dsuinit 产物" >&2
+            exit 1
+          fi
+          install -m 0755 "${loaders[0]}" out/dsuinit
+          # 全部 KO：查找 dsu_permissive-<target>.ko
+          mapfile -t kofiles < <(find "$ART" -type f -name 'dsu_permissive-*.ko')
+          if [ "${#kofiles[@]}" -eq 0 ]; then
+            echo "错误：未找到任何 dsu_permissive-*.ko 产物" >&2
+            exit 1
+          fi
+          for ko in "${kofiles[@]}"; do
+            tgt=${ko##*/}                 # dsu_permissive-<target>.ko
+            tgt=${tgt%.ko}                # dsu_permissive-<target>
+            tgt=${tgt#dsu_permissive-}    # <target>
+            install -m 0644 "$ko" "out/dsu_permissive-$tgt.ko"
           done
           ls -l out/
 

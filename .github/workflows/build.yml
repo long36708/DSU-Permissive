@@ -37,7 +37,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsuinit
-          path: out/dsuinit
+          path: loader/dsuinit
           if-no-files-found: error
 
   # 为每个 DDK target 用公开内核源码树交叉编译 dsu_permissive.ko。

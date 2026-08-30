@@ -16,6 +16,7 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/path.h>
+#include <linux/user_namespace.h>
 #include <linux/version.h>
 
 #define HOOK_TIMEOUT_SECONDS 120U
@@ -32,7 +33,12 @@ static void dsu_permissive_clear_failcount(void)
 
 	if (kern_path(DSU_FAILCOUNT_PATH, LOOKUP_FOLLOW, &path))
 		return;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	error = vfs_unlink(&init_user_ns,
+			   path.dentry->d_parent->d_inode, path.dentry, NULL);
+#else
 	error = vfs_unlink(path.dentry->d_parent->d_inode, path.dentry, NULL);
+#endif
 	if (error)
 		pr_warn("dsu-permissive：清零熔断计数失败（%d），下次启动将重新累计\n",
 			error);

@@ -37,14 +37,20 @@ jobs:
           path: out/dsuinit
           if-no-files-found: warn
 
-  # 内核模块 dsu_permissive.ko 依赖内核源码树（KDIR）与 vivo DDK 头。
-  # 公开 CI 没有这些资源，因此这个 job 默认跳过；如果你有可用的内核树，
-  # 在自托管 runner 上设置 KDIR 后它才会真正编译。
+  # 内核模块 dsu_permissive.ko 默认使用公开的内核源码树交叉编译验证。
+  # 若自托管 runner 已准备好内核树，可设置仓库变量 DSU_CI_KDIR 直接复用，
+  # 跳过内核源码下载；否则按 matrix 的 kernel_ref 从 kernel.org 拉取对应版本。
   module:
-    name: Kernel module (needs KDIR)
+    name: Kernel module (${{ matrix.kernel_ref }})
     runs-on: ubuntu-latest
-    # 没有 KDIR 时直接跳过，避免公开 CI 误报失败。
-    if: ${{ vars.DSU_CI_BUILD_MODULE == '1' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel_ref: v6.12
+            ddk_target: android16-6.12
+          - kernel_ref: v6.6
+            ddk_target: android15-6.6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,21 +60,48 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang lld llvm gcc-aarch64-linux-gnu
+            clang lld llvm gcc-aarch64-linux-gnu python3
+
+      - name: Prepare kernel tree
+        id: kdir
+        env:
+          KERNEL_REF: ${{ matrix.kernel_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DSU_CI_KDIR:-}" ]]; then
+            echo "reuse-kdir=${DSU_CI_KDIR}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KDIR="$RUNNER_TEMP/linux-${KERNEL_REF}"
+          echo "下载内核源码 ${KERNEL_REF}（shallow）"
+          git clone --depth 1 --branch "${KERNEL_REF}" \
+            https://github.com/torvalds/linux.git "$KDIR"
+          echo "reuse-kdir=${KDIR}" >> "$GITHUB_OUTPUT"
+
+      - name: modules_prepare
+        if: ${{ env.DSU_CI_KDIR == '' }}
+        working-directory: ${{ steps.kdir.outputs.reuse-kdir }}
+        run: |
+          set -euo pipefail
+          make ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            defconfig modules_prepare -j"$(nproc)"
 
       - name: Build module
         env:
-          KDIR: ${{ vars.DSU_CI_KDIR }}
+          KDIR: ${{ steps.kdir.outputs.reuse-kdir }}
+          DDK_TARGET: ${{ matrix.ddk_target }}
         run: |
           set -euo pipefail
-          test -n "${KDIR:-}" || { echo "错误：未设置 KDIR" >&2; exit 1; }
-          make module KDIR="$KDIR"
+          make module \
+            KDIR="$KDIR" \
+            ARCH=arm64 LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            DSU_DDK_TARGET="$DDK_TARGET"
           ls -l out/dsu_permissive.ko
 
       - name: Upload module artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dsu_permissive-ko
+          name: dsu_permissive-${{ matrix.ddk_target }}.ko
           path: out/dsu_permissive.ko
           if-no-files-found: warn

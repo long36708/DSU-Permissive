@@ -17,8 +17,10 @@
 #include <linux/namei.h>
 #include <linux/path.h>
 #include <linux/user_namespace.h>
-#include <linux/mnt_idmapping.h>
 #include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#include <linux/mnt_idmapping.h>
+#endif
 
 #define HOOK_TIMEOUT_SECONDS 120U
 

@@ -104,6 +104,11 @@ jobs:
         env:
           KDIR: ${{ runner.temp }}/linux-${{ matrix.kernel_ref }}
           DDK_TARGET: ${{ matrix.ddk_target }}
+          # 公开内核树只做了 modules_prepare，没有完整编译，因此缺
+          # Module.symvers。这些未解析符号（_printk、kern_path 等）在真机
+          # 内核里都正常导出，设为 warn 让 modpost 降级处理、正常产出可加载
+          # 的 .ko，而不是因缺符号表而失败。
+          KBUILD_MODPOST_WARN: "1"
         run: |
           set -euo pipefail
           make module \

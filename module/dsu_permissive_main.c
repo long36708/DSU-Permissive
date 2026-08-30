@@ -17,6 +17,7 @@
 #include <linux/namei.h>
 #include <linux/path.h>
 #include <linux/user_namespace.h>
+#include <linux/mnt_idmapping.h>
 #include <linux/version.h>
 
 #define HOOK_TIMEOUT_SECONDS 120U
@@ -33,7 +34,10 @@ static void dsu_permissive_clear_failcount(void)
 
 	if (kern_path(DSU_FAILCOUNT_PATH, LOOKUP_FOLLOW, &path))
 		return;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	error = vfs_unlink(&nop_mnt_idmap,
+			   path.dentry->d_parent->d_inode, path.dentry, NULL);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
 	error = vfs_unlink(&init_user_ns,
 			   path.dentry->d_parent->d_inode, path.dentry, NULL);
 #else
